@@ -240,7 +240,7 @@ No provider client is initialized in Milestone 1.
 ## 12. Incremental Milestones
 
 1. Project skeleton, health checks, connectivity, documentation, and tests
-2. Open Food Facts ingestion
+2. Open Food Facts ingestion and initial normalized Product Master (expanded Milestone 2 scope)
 3. Product cleaning and normalization
 4. Synthetic retail data
 5. PostgreSQL
@@ -281,3 +281,118 @@ Claims must be limited to measured prototype results and must not use “state o
 - Root environment, formatting, linting, test, and run commands are documented.
 - No fake AI data, provider calls, datasets, database clients, or retrieval behavior exists.
 - The next milestone does not begin without project-owner confirmation.
+
+## 15. Milestone 2 Product Master Contract
+
+Milestone 2 includes the cleaning/normalization needed to create Product Master, as explicitly requested by the project owner. It is an offline Python CLI (`pipelines/ingestion/openfoodfacts/`) invoked by `npm run ingest:off`. It does not add application routes, model inference, databases, or synthetic retail records.
+
+### Source and persistence
+
+- Official Open Food Facts export: `https://static.openfoodfacts.org/data/openfoodfacts-products.jsonl.gz`; configurable official export URL or local JSONL/CSV/TSV (including gzip).
+- Default limits: 12,000 raw records, 128 MiB compressed transfer, 3,000 final products. Sampling follows source order, without randomization.
+- Named raw snapshots record retrieval/import dates separately, source URL, redirect URL, export ETag/Last-Modified, source checksums, row count, and pipeline version. Unknown local-file retrieval dates remain unknown.
+- Compressed HTTP range chunks are saved atomically with checksums. Completed raw snapshots are immutable and replayable. Interrupted exports resume from cached chunks, gated by the export ETag; different remote versions cannot be mixed.
+- Normalization cache keys include raw SHA-256 and `PIPELINE_VERSION`. Image states persist independently per canonical product ID and URL, with file checksum and failure code. A repeated run reuses completed normalization and valid images.
+- Outputs are `data/processed/product_master.csv` and `data/reports/openfoodfacts_quality.json`; all generated data is Git-ignored. The report includes the CSV checksum to detect an interrupted or mismatched publication.
+
+### Canonical schema
+
+The executable schema is the Pydantic `Product` model in `pipelines/ingestion/openfoodfacts/models.py`. Each row contains:
+
+| Field                                                                     | Type / meaning                                                                          |
+| ------------------------------------------------------------------------- | --------------------------------------------------------------------------------------- |
+| `product_id`                                                              | Required string `OFF_<canonical barcode>`                                               |
+| `barcode`                                                                 | Required canonical OFF code, stored as text                                             |
+| `product_name`                                                            | Required non-blank name; original language retained                                     |
+| `brand`, `category`                                                       | Preferred descriptive text; empty string when absent                                    |
+| `ingredients`, `country`, `packaging`                                     | Optional text; no invented defaults                                                     |
+| `nutrition`                                                               | JSON object of selected finite non-negative nutrient values                             |
+| `nutrition_basis`                                                         | `100g`, `100ml`, or legacy `100g_or_100ml`; empty if no nutrition                       |
+| `nutrition_source`                                                        | `off_aggregated_as_sold` or `off_legacy_as_sold`                                        |
+| `image_url`                                                               | One validated official source URL, empty if absent/unsafe                               |
+| `image_path`                                                              | Verified local image path relative to the data directory, or empty                      |
+| `image_status`                                                            | `downloaded`, `failed`, `missing`, `not_checked` (internal `pending` before processing) |
+| `quantity`, `serving_size`                                                | Optional original descriptive text                                                      |
+| `categories_tags`, `brands_tags`, `countries_tags`, `labels`, `allergens` | Sorted, deduplicated JSON string arrays                                                 |
+| `barcode_checksum_valid`                                                  | Diagnostic GS1 check-digit flag                                                         |
+| `data_quality_score`                                                      | Deterministic completeness score in [0, 1]                                              |
+| `source`, `source_product_url`                                            | OFF attribution and per-product provenance                                              |
+
+CSV uses UTF-8 and JSON-encoded nested cells. Consumers must read identifier columns as text. Required-field and stable-ID validation runs again before publication. Empty optional strings/objects/arrays mean missing data, not negative business facts.
+
+### Normalization and validity
+
+1. Unicode NFC and repeated-whitespace normalization preserve meaningful names and original language. Null/NaN placeholder strings are treated as missing. Brand/category text is not aggressively recategorized; category/country tags are retained separately.
+2. Accept non-zero ASCII digit strings or integer inputs of 1–14 digits. Reject booleans, floats, decimals/scientific-notation strings, missing values, and non-digit input. Floats cannot reliably preserve identifiers and are never repaired by rounding.
+3. Apply [official OFF normalization](https://openfoodfacts.github.io/openfoodfacts-server/api/ref-barcode-normalization/): strip redundant leading zeros, pad up to 8 digits for short codes, pad 9–12 significant digits to 13, retain 13/14-digit codes. This makes UPC/EAN representations converge, e.g. `034000470693` → `0034000470693` → `OFF_0034000470693`.
+4. Validity here is **OFF structural code validity**, not GS1 certification. OFF includes internal/non-GS1 codes. GS1 checksum failures are explicitly flagged and counted rather than silently corrected or rejected. The required example `8901234567890` maps to `OFF_8901234567890` even though its GS1 checksum fails.
+5. Current OFF schema 1002+ `images.selected.front.<language>.imgid` and legacy `images.front_<language>.imgid` identify the actual selected front upload. Language preference: product language, English, then sorted available languages. AWS uses that upload's 400px image, not an invented image ID or a cropped-image revision filename. For the image folder only, pad short codes to 13 digits and split 3/3/3/remainder; this never changes the canonical barcode or product ID.
+6. Current schema 1003+ nutrition uses `nutrition.aggregated_set` **as sold**, with explicit `100g`/`100ml` basis and normalized units. Legacy `nutriments` or tabular `_100g` fields are also supported. Only energy-kJ/kcal, fat, saturated fat, carbohydrates, sugars, fiber, protein, salt, and sodium are retained. Weight nutrients are in grams, energy in kJ/kcal. `_100g` keys follow OFF's legacy convention, which can mean 100ml for liquids; consult `nutrition_basis`. Prepared, per-serving, unsupported units, non-finite and negative values are not mixed into these fields.
+
+### Duplicate rule and ranking
+
+Barcode is the only deduplication identity. Choose one whole record deterministically: highest provisional seven-field completeness score, then most non-empty canonical fields, then lexicographically smallest canonical JSON representation. Whole-record selection avoids creating contradictory merged ingredient/nutrition facts. Select the top target number after deduplication; final CSV rows are sorted by product ID. No random tie-breaking or synthetic records are used.
+
+### Image verification and score
+
+- One selected front upload per product, downloaded from OFF's [official AWS mirror](https://openfoodfacts.github.io/openfoodfacts-server/api/aws-images-dataset/) where source image IDs are available. Primary OFF server URLs from older exports remain supported with serial throttling.
+- Default AWS concurrency/rate: four workers, four request starts/second; primary OFF host: one at a time, one/second. Bounded HTTP retries respect `Retry-After`; long cooldowns defer rather than retry early.
+- Allowlisted HTTPS URLs, validated redirects, byte limits, MIME/format checks (JPEG/PNG/WebP), safe dimensions, complete pixel decoding, atomic files, and per-image state make individual failures non-fatal. Corrupted cached bytes are detected before reuse. Successful images are skipped; failed images are retried only with `--retry-failed`.
+- Final score = `(barcode + name + brand + category + verified_image + ingredients + nutrition) / 7`, with Boolean presence flags, rounded to four decimals. Before image downloads, the ranking score uses a safe image URL as a provisional signal. Unchecked URLs never earn final image credit.
+- The report distinguishes raw/valid/unique counts, invalid reasons, duplicates, final count, available image URLs, verified downloads, failures, unchecked/missing images, missing fields, checksum flags, and average score. Invalid reason counts can overlap on one rejected record; `invalid_records` counts each rejected row once.
+
+### Verification boundary
+
+Focused offline tests cover identifiers, current/legacy schemas, duplicates, missing optional data, raw range caching, changed-source refusal, retry handling, failed/corrupt images, image/normalization resume, deterministic CSV, and honest shortfalls. `npm run check` includes these tests and all Milestone 1 checks. Dataset inspection additionally validates every Product Master row, uniqueness, report consistency, and downloaded image checksums. Milestone 3 remains gated by explicit confirmation.
+
+## 16. Milestone 3 Canonical Dataset Contract
+
+Milestone 3 is a separate transformation within the existing Python package: `pipelines/ingestion/canonicalization/`, exposed by `npm run normalize:products`. It reads Milestone 2's CSV and referenced local images only. Ingestion, raw source snapshots, downloads, API routes, and application services are not redesigned. No external services are called.
+
+### Identity, source preservation and publication
+
+- Input IDs and barcodes are strings, validated **verbatim** and carried through unchanged. Never repair, regenerate, or reassign an identity in this stage.
+- All rows survive a successful run. Duplicate IDs/barcodes, identity mismatches, malformed CSV/JSON, or empty required names abort publication; no silent deduplication or filtering occurs.
+- `product_master_canonical.csv` is published separately from `product_master.csv`. It has 43 fields. The original source dataset and report remain available for comparison; downstream promotion to primary Product Master is a separate decision.
+- Canonical rows retain the 25 Milestone 2 fields. When a source cell changes, its exact original string is stored in `source_values`; unchanged values need no redundant copy. This includes category/tag placeholders, formatting corrections, score changes, and unusable image references.
+- The canonical report includes input/output SHA-256, input/image roots, source report checksum, source retrieval date, processing time, normalization version, exact columns, before/after audit counts, changed fields, and review issues. An unavailable retrieval date is explicitly null.
+- `CANONICAL_VERSION` is independent of the Milestone 2 ingestion version. Increment it when changing the canonical contract or transformation rules. Determinism assumes the same input CSV and local image bytes; processing timestamps exist only in the report.
+
+### Added fields (18)
+
+| Field                         | Representation and purpose                                                                                                            |
+| ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| `source_values`               | JSON object of changed field → exact original CSV cell                                                                                |
+| `product_name_normalized`     | Case-folded NFC search name; original display casing retained in `product_name`                                                       |
+| `brand_normalized`            | Sorted JSON array of conservative, case-folded brand tokens; no fuzzy/diacritic-based brand merges                                    |
+| `category_normalized`         | Sorted JSON array of genuine OFF category tags; preserve namespace/hierarchy; `text:` fallback for untagged source text               |
+| `country_normalized`          | Sorted JSON array of country tags, retaining all supplied countries; `text:` fallback                                                 |
+| `quantity_normalized`         | Search form of quantity; simple unit/spacing normalization, no guessed conversions                                                    |
+| `search_text`                 | Deterministic labeled product text for later text retrieval/embeddings                                                                |
+| `missing_value_reasons`       | JSON object distinguishing absence, explicit source-unavailable/not-applicable, placeholders, and missing image states                |
+| `normalization_issues`        | Sorted JSON array of cleaning changes and source-data review flags                                                                    |
+| `nutrition_review_required`   | Boolean; flags high source nutrient values without rewriting them                                                                     |
+| `image_available`             | Boolean; file presence observed during local inspection, even if decoding/format later fails                                          |
+| `image_valid`                 | Boolean; eligible for future image processing only after local validation                                                             |
+| `image_format`                | Detected format; valid set JPEG/PNG/WebP, empty if undetectable                                                                       |
+| `image_width`, `image_height` | Positive pixel dimensions, nullable when unavailable                                                                                  |
+| `image_size_bytes`            | Local file size, nullable when unavailable                                                                                            |
+| `image_sha256`                | Checksum of inspected bounded image bytes, empty if unavailable                                                                       |
+| `image_validation_status`     | `valid`, `no_path`, `unsafe_path`, `missing_file`, `unreadable`, `oversize`, `unsupported_format`, `invalid_dimensions`, or `corrupt` |
+
+CSV is UTF-8 with JSON cells for objects/arrays and empty cells for absent optional scalars. `search_text` uses quoted multiline CSV cells; count rows with a CSV parser, not physical line counting. `image_path` remains relative to the report's image root, and is usable only when `image_valid=true`.
+
+### Normalization decisions from the actual audit
+
+1. Input whitespace/NFC normalization was already sound. Safely decode HTML entities in ingredients/serving text; preserve order, percentages, variants, pack size, display casing, and meaningful Unicode. Do not repair guessed OCR spelling or mojibake.
+2. Case folding resolves casing-only brand/search variants. Accents and distinct spellings remain distinct; no brand alias mappings are currently justified or introduced.
+3. Category missingness was overstated as completeness: 1,802 source values consisted solely of placeholders (`undefined`, `en:null`, etc.). Remove only complete placeholder tokens. Preserve every genuine category tag, including parents and multiple languages; do not infer a leaf from sorted tag order.
+4. Country tags supply a consistent multi-country representation alongside display strings. Raw/source strings remain recoverable. Missing packaging remains missing; standalone `Unknown` gets no fabricated replacement.
+5. Nutrition remains a compact, finite, non-negative JSON object with the existing basis/source. The audit found 632 weight-nutrient values above 100 across 435 products. Flag `over_100g_per_100g` for explicit 100g basis and `high_value_basis_review` for 100ml/ambiguous legacy bases. Preserve source values for review; do not infer serving corrections. These flagged facts require review before downstream factual claims.
+6. Every referenced image is locally opened and decoded using the existing Milestone 2 image checks. Unsafe/missing/invalid usable paths are cleared with source preservation and explicit status. No image requests or repairs are made.
+7. Search text uses a fixed field order: name, brand, normalized categories, ingredients, normalized countries, packaging, quantity. Empty fields are omitted. Nutrition and operational retail fields are excluded.
+8. Reuse `Product.score(image_valid)` with the original seven equal presence weights. Cleaned placeholders do not count as present. The initial canonical score is 0.8679 versus 0.9537 before cleaning; this remains a completeness measure, not factual correctness.
+
+### Validation gate
+
+`--validate` recomputes the entire expected canonical dataset from the immutable input and current local image bytes. It checks all schema/identity rules, exact row preservation, derived text, image metadata/checksums, byte-identical CSV, and every report field except processing time. It is read-only and cannot silently regenerate either output. Focused tests are included in the existing `npm run check` pipeline. Milestone 4 remains gated by explicit project-owner confirmation.

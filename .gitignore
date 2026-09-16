@@ -26,6 +26,8 @@ uploads/
 # Large/generated project assets
 data/raw/
 data/processed/
+data/reports/
+data/.ingestion.lock
 data/synthetic/generated/
 models/weights/
 

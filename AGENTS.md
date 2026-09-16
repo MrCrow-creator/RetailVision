@@ -20,17 +20,24 @@ RetailVision is a final-year BE AI and Data Science implementation/adaptation in
 
 ## Current State
 
-- Milestone 1 foundation is the only implemented scope.
+- Milestone 1 foundation, Milestone 2 ingestion, and Milestone 3 local canonicalization are implemented.
 - Frontend checks the Express health endpoint.
 - Express checks its own health and can check FastAPI health.
-- AI, databases, ingestion, retrieval, vision, OCR, and LLM reasoning are not implemented.
-- Do not begin Milestone 2 without explicit user confirmation.
+- `npm run ingest:off` creates a bounded OFF raw snapshot, canonical CSV, images, and quality report.
+- AI, databases, retrieval, vision, OCR, synthetic retail data, and LLM reasoning are not implemented.
+- `npm run normalize:products` produces a separate canonical CSV, image metadata, search text, and review flags.
+- Do not begin Milestone 4 without explicit user confirmation.
 
 ## Repository Map
 
 - `frontend/`: browser application.
 - `backend/`: API and future evidence orchestration.
 - `ai-service/`: Python model/inference boundary.
+- `pipelines/ingestion/openfoodfacts/`: offline CLI, schema, normalization, and resumable downloads.
+- `pipelines/ingestion/canonicalization/`: local Milestone 3 transformation and validation.
+- `data/processed/product_master.csv`: canonical product dataset (generated, Git-ignored).
+- `data/processed/product_master_canonical.csv`: separately validated Milestone 3 candidate dataset.
+- `data/reports/openfoodfacts_quality.json`: measured quality and provenance (generated).
 - `docs/openapi.yaml`: current backend API contract.
 - `PROJECT_SPEC.md`: architecture, boundaries, data rules, and milestone plan.
 
@@ -41,3 +48,6 @@ RetailVision is a final-year BE AI and Data Science implementation/adaptation in
 - Deterministic code computes stock conditions and analytics; the LLM explains retrieved evidence and must not invent facts.
 - Add only milestone-relevant folders and dependencies.
 - Run `npm run check` before declaring a milestone complete.
+- OFF codes follow official leading-zero normalization. Image-folder padding is separate from product identity. GS1 checksum is a reported diagnostic, not the ID rule.
+- Raw snapshots are immutable. Bump `PIPELINE_VERSION` when changing normalization/schema so cached products cannot silently survive changed rules. Later pipelines consume Product Master references, not every cached image in the raw directory.
+- Milestone 3 preserves input IDs verbatim and never overwrites Milestone 2 data. Version canonical rules with `CANONICAL_VERSION`. Later consumers must honor `image_valid` and `nutrition_review_required`; the completeness score is not an accuracy guarantee, and sorted category tags do not imply a leaf hierarchy.
