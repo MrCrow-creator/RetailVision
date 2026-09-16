@@ -1,0 +1,106 @@
+openapi: 3.1.0
+info:
+  title: RetailVision Orchestration API
+  version: 0.1.0
+  description: Milestone 1 health API for the RetailVision orchestration backend.
+servers:
+  - url: http://localhost:4000/api/v1
+    description: Local development
+paths:
+  /health:
+    get:
+      operationId: getBackendHealth
+      summary: Check the backend process
+      tags: [Health]
+      responses:
+        "200":
+          description: The backend is healthy.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+  /health/ai:
+    get:
+      operationId: getAiServiceHealth
+      summary: Check backend connectivity to the AI service
+      tags: [Health]
+      responses:
+        "200":
+          description: The AI service responded with a valid healthy status.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AiDependencyResponse"
+        "503":
+          description: The AI service is unavailable or returned an invalid response.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DependencyErrorResponse"
+components:
+  schemas:
+    HealthResponse:
+      type: object
+      additionalProperties: false
+      required: [status, service, version, timestamp]
+      properties:
+        status:
+          type: string
+          const: ok
+        service:
+          type: string
+          const: backend
+        version:
+          type: string
+          examples: [0.1.0]
+        timestamp:
+          type: string
+          format: date-time
+    AiDependencyResponse:
+      type: object
+      additionalProperties: false
+      required: [status, service, upstream]
+      properties:
+        status:
+          type: string
+          const: ok
+        service:
+          type: string
+          const: ai-service
+        upstream:
+          type: object
+          additionalProperties: true
+          required: [status, service, version, timestamp]
+          properties:
+            status:
+              type: string
+              const: ok
+            service:
+              type: string
+              const: ai-service
+            version:
+              type: string
+            timestamp:
+              type: string
+              format: date-time
+    DependencyErrorResponse:
+      type: object
+      additionalProperties: false
+      required: [status, service, error]
+      properties:
+        status:
+          type: string
+          const: degraded
+        service:
+          type: string
+          const: ai-service
+        error:
+          type: object
+          additionalProperties: false
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              const: AI_SERVICE_UNAVAILABLE
+            message:
+              type: string

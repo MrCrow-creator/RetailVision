@@ -1,0 +1,41 @@
+{
+  "name": "retailvision",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Retail Multimodal Knowledge Intelligence Platform",
+  "workspaces": [
+    "frontend",
+    "backend"
+  ],
+  "scripts": {
+    "dev": "concurrently --kill-others-on-fail --names frontend,backend,ai --prefix-colors cyan,magenta,yellow \"npm:dev:frontend\" \"npm:dev:backend\" \"npm:dev:ai\"",
+    "dev:frontend": "npm run dev --workspace @retailvision/frontend",
+    "dev:backend": "npm run dev --workspace @retailvision/backend",
+    "dev:ai": ".\\.venv\\Scripts\\python.exe ai-service/run.py",
+    "build": "npm run build --workspaces --if-present",
+    "lint": "npm run lint:web && npm run lint:ai",
+    "lint:web": "npm run lint --workspaces --if-present",
+    "lint:ai": ".\\.venv\\Scripts\\python.exe -m ruff check ai-service",
+    "test": "npm run test:web && npm run test:ai",
+    "test:web": "npm run test --workspaces --if-present",
+    "test:ai": ".\\.venv\\Scripts\\python.exe -m pytest -c ai-service/pyproject.toml ai-service/tests",
+    "format": "prettier . --write && .\\.venv\\Scripts\\python.exe -m ruff format ai-service",
+    "format:check": "prettier . --check && .\\.venv\\Scripts\\python.exe -m ruff format --check ai-service",
+    "check": "npm run lint && npm test && npm run build && npm run format:check"
+  },
+  "keywords": [
+    "retail-intelligence",
+    "multimodal-rag",
+    "knowledge-graph"
+  ],
+  "author": "",
+  "license": "ISC",
+  "engines": {
+    "node": "^22.13.0 || ^24.0.0 || >=26.0.0",
+    "npm": ">=10"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1",
+    "prettier": "^3.6.2"
+  }
+}

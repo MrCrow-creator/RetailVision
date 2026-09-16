@@ -1,0 +1,9 @@
+node_modules
+dist
+coverage
+.venv
+.pytest_cache
+.ruff_cache
+package-lock.json
+data
+models
