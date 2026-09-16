@@ -396,3 +396,55 @@ CSV is UTF-8 with JSON cells for objects/arrays and empty cells for absent optio
 ### Validation gate
 
 `--validate` recomputes the entire expected canonical dataset from the immutable input and current local image bytes. It checks all schema/identity rules, exact row preservation, derived text, image metadata/checksums, byte-identical CSV, and every report field except processing time. It is read-only and cannot silently regenerate either output. Focused tests are included in the existing `npm run check` pipeline. Milestone 4 remains gated by explicit project-owner confirmation.
+
+## 17. Milestone 4 Synthetic Retail Contract
+
+**Controlled synthetic retail operational data linked to real Open Food Facts product records.** Public product metadata lacks complete retailer-specific operational information, so this stage supplies a transparent academic simulation. It does not claim to describe real retailer stock, prices, sales, suppliers, or promotions.
+
+Implementation: `pipelines/ingestion/retail/` in the existing offline Python package. Input: `data/processed/product_master_canonical.csv`, validated against `CanonicalProduct` and, by default, its matching checksum-bound canonical report. Output: ten relational CSVs and metadata under `data/synthetic/`, with a quality report under `data/reports/`. No real Product Master fields are overwritten and no products are generated.
+
+### Relational CSV schema
+
+All IDs are strings, all counts are integers, money is decimal INR (two decimal places), and dates are ISO `YYYY-MM-DD`. Executable row schemas are in `schema.py`; cross-table validation is in `validation.py`.
+
+| Dataset                  | Columns                                                                                                     | Key / relationship                                                      |
+| ------------------------ | ----------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
+| `stores.csv`             | `store_id`, `store_name`, `city`, `region`, `store_type`                                                    | PK `store_id`; fictional RetailVision entities                          |
+| `shelves.csv`            | `shelf_id`, `store_id`, `shelf_name`, `aisle`, `category`, `capacity`                                       | PK `shelf_id`; FK store; synthetic merchandising category               |
+| `placements.csv`         | `placement_id`, `product_id`, `store_id`, `shelf_id`, `facings`, `shelf_position`                           | PK `placement_id`; unique product/store; FKs Product Master/store/shelf |
+| `inventory.csv`          | `inventory_id`, `placement_id`, `product_id`, `store_id`, `shelf_id`, `stock`, `reorder_level`, `max_stock` | PK `inventory_id`; unique placement; exact placement tuple match        |
+| `sales.csv`              | `product_id`, `store_id`, `units_sold_7d`, `units_sold_30d`                                                 | Composite PK product/store; exactly one row per placement pair          |
+| `prices.csv`             | `product_id`, `store_id`, `base_price`, `current_price`, `currency`                                         | Composite PK product/store; exactly one row per placement pair          |
+| `suppliers.csv`          | `supplier_id`, `supplier_name`, `region`                                                                    | PK `supplier_id`; fictional supply entities                             |
+| `product_suppliers.csv`  | `product_id`, `supplier_id`                                                                                 | PK product; exactly one primary supplier for every source product       |
+| `promotions.csv`         | `promotion_id`, `promotion_name`, `promotion_type`, `discount_percentage`, `start_date`, `end_date`         | PK `promotion_id`; percentage-based campaign definitions                |
+| `product_promotions.csv` | `placement_id`, `product_id`, `store_id`, `shelf_id`, `promotion_id`                                        | PK placement; zero or one campaign per placement; exact tuple match     |
+
+Entity formats: `STORE_001`, `SHELF_001_01`, `SUP_001`, `PROMO_001`. Placement IDs are `PLC_<store_id>_<product_id>`, inventory IDs are `INV_<store_id>_<product_id>`. Names and source row numbers are never foreign keys. Product IDs are preserved verbatim as `OFF_<barcode>`.
+
+One shelf placement per product/store makes store-scoped prices and sales unambiguous. Promotion assignments must retain store/placement context in later SQL and graph imports; a Product→Promotion graph edge must not imply a discount in every store. Supplier assignments are global primary supplier relationships, while shelves and inventory are store-specific.
+
+### Generation rules and limits
+
+- Defaults: 3,000 input products, 8 stores, 15 shelves per store, 6,500 placements, 30 suppliers, 200 campaigns, 15% placement assignments. Every input product appears in at least one store and has exactly one primary supplier. Default maximum coverage is four stores/product. Infeasible requested placement counts fail explicitly.
+- A fixed `random.Random(seed)` operates over sorted source IDs and deterministic iteration orders. Different stores vary in assortment, demand, and prices. Explicit fixture tests verify output equality across different process hash seeds.
+- `rules.py` lists exact OFF category tags, synthetic merchandising groups, category-dependent INR price ranges, and demand multipliers. Missing/unmapped tags fall back to General Grocery for shelf organization only. Canonical product categories remain untouched, including the existing 1,803 missing categories.
+- Shelf groups are allocated using each store's product-profile mix. Facings occupy non-overlapping positive intervals; a shelf represents a merchandising zone with aggregate unit capacity. The sum of placement `max_stock` reservations cannot exceed that capacity.
+- Stock draws from a controlled 65/24/8/3 healthy/low/critical/out-of-stock target mix. `0 <= stock <= max_stock`, `0 < reorder_level < max_stock`. Mutually exclusive report buckets separate zero stock, positive critical stock at/below one-quarter reorder, other below-reorder stock, and healthy stock. The inclusive `low_stock_count` is every row satisfying `stock < reorder_level`.
+- Synthetic monthly demand uses slow/normal/fast product baselines, category factor, store factor, facings, bounded noise, and modest promotion lift. Generate the recent 7-day and prior 23-day windows separately; their sum is the 30-day total. Historical promotion overlap affects only overlapping days. Current stock is a snapshot; sales totals are not a simulated stock ledger or ML forecast.
+- Base prices are product-profile-dependent with up to ±5% store variation. Price bands are assumptions, not sourced prices; package-size and import economics are not estimated. Money uses Decimal with `ROUND_HALF_UP` to two places. Current price is exactly `base_price * (1 - discount / 100)` when the assigned promotion is active, otherwise base price.
+- Campaign types are `PERCENTAGE_DISCOUNT`, `CLEARANCE`, `SEASONAL`, all explicitly percentage-based. Default rates 5–25%; schema ceiling 35%. Do not interpret these as flat discounts or BOGO. Dates satisfy start < end, active bounds inclusive. Campaign mix is 70% active, 20% expired, 10% scheduled at the fixed simulation date.
+- Six seeded placement identities deliberately anchor scenarios A–F. Report actual counts for high-sales/low-stock, high-sales/healthy, low-sales/high-stock, active-promotion/low-stock, active-promotion/high-sales, and out-of-stock/recent-sales. Defaults define high sales as ≥90 units/30 days, low sales as ≤15, high stock as ≥75% of maximum. Fail validation if any required scenario is absent.
+- Images and nutrition, including review-flagged source values, are not used to invent retail data or exclude products. Existing canonical review rules continue to apply to later factual retrieval.
+
+### Reproducibility, metadata and validation
+
+Configuration uses root `.env` `SYNTHETIC_*` variables, documented in `.env.example`/README, plus CLI overrides. `SYNTHETIC_AS_OF_DATE` (default `2026-09-17`) is the simulation anchor for stock, sales windows and campaign activity. `generation_timestamp` is explicitly labeled simulation midnight UTC, not the wall-clock execution time; real execution timestamps appear only in structured logs. All ten CSVs, `metadata.json`, and `synthetic_retail_quality.json` therefore reproduce byte-for-byte for identical input bytes, seed, configuration and rule version.
+
+Metadata includes the canonical CSV checksum, seed, configuration, `RETAIL_VERSION`, deterministic generation ID, schemas, and CSV checksums. The quality report additionally includes counts, stock/sales/promotion distributions, store/product coverage, scenario counts/examples, and referential-integrity results. Increment `RETAIL_VERSION` when changing generation or validation semantics. Output locations do not affect generated bytes.
+
+`npm run generate:retail` generates and validates locally. `--dry-run` validates input/scale and shows settings without writes. `--validate` is read-only: it checks actual stored rows for types, primary keys, foreign keys, shelf-store and placement-tuple consistency, full inventory/sales/price coverage, primary suppliers, dates, discount math, shelf reservations, and facing overlaps. It then regenerates expected bytes in memory and compares all twelve files, detecting drift in input/configuration/rules and edited or interrupted outputs. Invalid references are reported and never silently dropped or replaced.
+
+Files are atomically replaced individually, with manifest/report published last; this is not a multi-file database transaction. Validation detects partial output sets; repeat generation repairs them. The Product Master and prior milestone reports are protected from output-path collisions. All generated retail files are Git-ignored. Existing tests plus focused retail tests run under `npm run check`.
+
+Milestone 5 database loading requires explicit project-owner confirmation.

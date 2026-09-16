@@ -28,7 +28,7 @@ data/raw/
 data/processed/
 data/reports/
 data/.ingestion.lock
-data/synthetic/generated/
+data/synthetic/
 models/weights/
 
 # Editors and operating systems

@@ -19,7 +19,9 @@ Milestone 2 adds an offline **Open Food Facts → immutable raw snapshot → nor
 
 Milestone 3 adds local, conservative canonicalization of that Product Master, image metadata, deterministic search text, and a separate versioned canonical CSV.
 
-Databases, embeddings, YOLO, OCR, retrieval, LLM calls, synthetic retail data, and the full dashboard are **not implemented yet**.
+Milestone 4 adds **controlled synthetic retail operational data linked to real Open Food Facts product records**, with seeded generation, relational validation, and reproducible file checksums.
+
+Databases, embeddings, YOLO, OCR, retrieval, LLM calls, and the full dashboard are **not implemented yet**.
 
 ## Architecture
 
@@ -63,7 +65,7 @@ python -m pip install -e ".\ai-service[dev]"
 python -m pip install -e ".\pipelines[dev]"
 ```
 
-Keep real API keys only in `.env`. No key is required for Milestones 1–3.
+Keep real API keys only in `.env`. No key is required for Milestones 1–4.
 
 The current root Python scripts explicitly use the Windows `.venv\Scripts\python.exe` interpreter. For ingestion on Linux/macOS, activate the virtual environment, install `./pipelines[dev]`, and run `python -m ingestion.openfoodfacts` directly.
 
@@ -312,6 +314,121 @@ The original seven-flag **completeness score** is reused through `Product.score(
 
 The report contains exact columns, checksums, source retrieval date, processing timestamp/version, before/after missingness, image statistics, changed-field counts, and per-product issues. Repeated runs with identical CSV bytes, referenced image bytes, and normalization rules produce byte-identical canonical CSVs. Report processing timestamps may differ; validation compares every other report field and all output bytes. See the [canonical schema contract](PROJECT_SPEC.md#16-milestone-3-canonical-dataset-contract).
 
+## Milestone 4: Synthetic Retail Operational Data
+
+Public product datasets describe products, but do not supply complete store-specific stock, supplier, sales, and promotion records. This milestone creates **controlled synthetic retail operational data linked to real Open Food Facts product records** for the academic prototype.
+
+**Real source data:** product IDs, barcodes, names, brands, categories, ingredients, nutrition, countries, and images. **Synthetic context:** fictional stores and suppliers, shelf organization, placements, stock, prices, sales, and promotions. No synthetic values are added to the canonical Product Master. Stock and sales do not represent actual retailer operations or ML predictions.
+
+### Run, validate, inspect
+
+The existing installed `pipelines` package contains this module; no additional dependencies or servers are needed.
+
+```powershell
+# Generate all retail CSVs, metadata, and quality report.
+npm run generate:retail
+
+# Validate existing files without rewriting anything.
+npm.cmd run generate:retail -- --validate
+
+# Load/validate Product Master and preview settings; write no files.
+npm.cmd run generate:retail -- --dry-run
+
+# Inspect the full quality report, distributions, and scenario examples.
+npm.cmd run generate:retail -- --inspect-report
+
+# Focused tests and all project checks.
+npm run test:retail
+npm run check
+```
+
+CLI options include `--seed`, `--as-of-date`, `--store-count`, `--shelves-per-store`, `--supplier-count`, `--promotion-count`, `--placement-count`, `--input`, `--input-report`, `--output-dir`, `--report`, and `--data-dir`. Windows PowerShell should use `npm.cmd` for forwarded options. On Linux/macOS, use `python -m ingestion.retail` in the installed virtual environment.
+
+Default input: `data/processed/product_master_canonical.csv`, validated with its matching canonical report. Custom inputs must have the same canonical schema; provide `--input-report` to bind a supplied provenance report. Every product reference uses the source `product_id` verbatim. Duplicate/invalid IDs and infeasible placement counts fail rather than producing replacement products.
+
+### Generated datasets
+
+```text
+data/synthetic/
+|-- stores.csv
+|-- shelves.csv
+|-- placements.csv
+|-- inventory.csv
+|-- sales.csv
+|-- prices.csv
+|-- suppliers.csv
+|-- product_suppliers.csv
+|-- promotions.csv
+|-- product_promotions.csv
+`-- metadata.json
+
+data/reports/synthetic_retail_quality.json
+```
+
+Each product has one primary supplier and appears in one to four stores by default. A product has **at most one shelf placement per store**, making inventory, prices, and sales straightforward to join. `inventory` and `product_promotions` carry a precise `placement_id` plus the product/store/shelf tuple; validation requires these to agree. Promotion assignments are store/placement-specific, not global product discounts.
+
+Schemas are documented in [PROJECT_SPEC.md](PROJECT_SPEC.md#17-milestone-4-synthetic-retail-contract) and included in `metadata.json`. CSVs use UTF-8, integer counts, ISO dates, and decimal INR amounts with two digits after the decimal point and no currency symbols. All generated files are Git-ignored.
+
+### Configuration and reproducibility
+
+`RetailSettings` reads root `.env` with the `SYNTHETIC_` prefix; explicit CLI values take precedence.
+
+| Variable                           | Default      | Meaning                                         |
+| ---------------------------------- | ------------ | ----------------------------------------------- |
+| `SYNTHETIC_SEED`                   | `42`         | Fixed pseudo-random seed                        |
+| `SYNTHETIC_AS_OF_DATE`             | `2026-09-17` | Fixed simulation snapshot date                  |
+| `SYNTHETIC_STORE_COUNT`            | `8`          | Fictional stores                                |
+| `SYNTHETIC_SHELVES_PER_STORE`      | `15`         | Shelf/merchandising zones per store             |
+| `SYNTHETIC_SUPPLIER_COUNT`         | `30`         | Fictional suppliers                             |
+| `SYNTHETIC_PROMOTION_COUNT`        | `200`        | Campaign definitions                            |
+| `SYNTHETIC_PLACEMENT_COUNT`        | `6500`       | Distinct product/store placements               |
+| `SYNTHETIC_MAX_STORES_PER_PRODUCT` | `4`          | Product distribution cap                        |
+| `SYNTHETIC_PROMOTION_RATE`         | `0.15`       | Fraction of placements assigned campaigns       |
+| `SYNTHETIC_HIGH_SALES_THRESHOLD`   | `90`         | High sales: at least this many units in 30 days |
+| `SYNTHETIC_LOW_SALES_THRESHOLD`    | `15`         | Low sales: at most this many units in 30 days   |
+
+Dates never depend on the current wall clock. For byte-identical results, `generation_timestamp` in output metadata/report is the **declared simulation snapshot time** (midnight UTC on `as_of_date`), clearly labeled by `timestamp_semantics`. Actual execution timestamps are written to structured console logs only. Thus all **10 CSVs, metadata, and the quality report** can reproduce exactly across repeated runs and different output directories.
+
+The metadata records the input CSV SHA-256, seed, configuration, `RETAIL_VERSION`, generation ID, schemas, and per-CSV checksums. `--validate` checks foreign keys and business constraints, regenerates the expected data in memory, and compares every published file byte-for-byte. Changed input bytes, seed, date, rules, config, or edited outputs are detected. Validation never silently removes bad references or rewrites files. Rerunning generation repairs an interrupted output set; manifest/report checks expose incomplete sets.
+
+### Modeling assumptions
+
+- Synthetic shelf groups and price/demand profiles match explicit existing OFF tags using the transparent table in `pipelines/ingestion/retail/rules.py`. Unmatched or missing categories use **General Grocery for shelf organization only**. This run has 1,803 missing product categories; 2,192 products use the fallback because the small profile table does not cover every known category. No product-category inference is performed.
+- Price bands vary by profile (e.g. beverages ₹20–220, snacks ₹20–280, cooking oils ₹100–850), with at most ±5% store variation. These are prototype assumptions, not collected retailer prices or package-size valuations. Money uses decimal arithmetic and round-half-up to two places.
+- Sales combine a per-product slow/normal/fast baseline, profile demand factor, store variation, facings, bounded noise, and modest promotion lift. Seven-day and preceding 23-day windows are generated separately and added, ensuring `units_sold_7d <= units_sold_30d`. Promotion lift applies only to overlapping days, including past promotions within the sales window.
+- Stock uses a controlled mixture targeting 65% healthy, 24% low, 8% critical, and 3% out of stock. Maximum stock is related to facings; reorder levels are below maximum. Current out-of-stock and historical sales are compatible because this is a snapshot, not a stock-movement ledger.
+- Shelf capacity is **aggregate unit capacity of a merchandising zone**, not a measured physical shelf plan. Reserved `max_stock` totals fit within capacity, with synthetic headroom. Facing intervals cannot overlap.
+- Campaigns use `PERCENTAGE_DISCOUNT`, `CLEARANCE`, or `SEASONAL`, all with percentage-price semantics. Default discounts are 5–25%; 70% of campaigns are active, 20% expired, 10% scheduled. Flat discounts and BOGO are not modeled. Active dates are inclusive; inactive promotions leave current price equal to base price.
+- Six randomly selected placement identities deliberately anchor cases A–F. All other rows use controlled variation. The report verifies many additional examples and does not assume every promoted or low-stock item has high sales.
+- Image availability and flagged nutrition values are not used to fabricate operational values. The canonical records and their review flags remain intact.
+
+### Verified initial output
+
+Seed `42`, simulation date `2026-09-17`, canonical input checksum beginning `dd7c31309671de751`:
+
+| Dataset                                  |          Rows |
+| ---------------------------------------- | ------------: |
+| Stores / shelves                         |       8 / 120 |
+| Placements / inventory                   | 6,500 / 6,500 |
+| Sales / prices                           | 6,500 / 6,500 |
+| Suppliers / primary supplier assignments |    30 / 3,000 |
+| Promotions / promotion assignments       |     200 / 975 |
+
+Exclusive stock buckets: **4,175 healthy**, **1,576 low**, **527 critical**, **222 out of stock**. The inclusive business condition `stock < reorder_level` matches **2,325** inventory records. Critical means positive stock at or below `max(1, reorder_level // 4)` and below reorder; out-of-stock is zero.
+
+Average 30-day sales: **65.87 units**, range **0–291**. High-sales product/store pairs: **1,512** (≥90); low-sales pairs: **1,183** (≤15). There are **140 active campaigns**, with **682 actively promoted placements (10.49%)**. Across all campaign dates, **975 placements (15%)** and **853 distinct products (28.43%)** have assignments; these are different denominators.
+
+| Case | Rule                                      | Examples |
+| ---- | ----------------------------------------- | -------: |
+| A    | High sales + below reorder level          |      546 |
+| B    | High sales + healthy stock                |      966 |
+| C    | Low sales + stock at least 75% of maximum |      354 |
+| D    | Active promotion + below reorder level    |      223 |
+| E    | Active promotion + high sales             |      187 |
+| F    | Out of stock + positive 7-day sales       |      211 |
+
+All foreign-key-like references pass validation. Case counts can overlap, and percentages may differ slightly from 100% after rounding. No database loading, AI calls, or frontend work is included in this milestone.
+
 ## API Contract
 
 The backend contract is in [`docs/openapi.yaml`](docs/openapi.yaml).
@@ -347,4 +464,4 @@ Model and additional pipeline directories will be added when their milestones be
 
 ## Next Milestone
 
-Milestone 4 (synthetic retail data) requires explicit project-owner confirmation. Future pipelines must reference the approved Product Master IDs and respect image-validity and nutrition-review flags.
+Milestone 5 (PostgreSQL loading) requires explicit project-owner confirmation. Future consumers must preserve product IDs, synthetic provenance, store-scoped promotion assignments, and canonical image/nutrition review flags.

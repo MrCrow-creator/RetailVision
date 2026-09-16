@@ -23,6 +23,8 @@
     "test:ingestion": ".\\.venv\\Scripts\\python.exe -m pytest -c pipelines/pyproject.toml pipelines/tests",
     "ingest:off": ".\\.venv\\Scripts\\python.exe -m ingestion.openfoodfacts",
     "normalize:products": ".\\.venv\\Scripts\\python.exe -m ingestion.canonicalization",
+    "generate:retail": ".\\.venv\\Scripts\\python.exe -m ingestion.retail",
+    "test:retail": ".\\.venv\\Scripts\\python.exe -m pytest -c pipelines/pyproject.toml pipelines/tests/test_retail.py",
     "test:normalization": ".\\.venv\\Scripts\\python.exe -m pytest -c pipelines/pyproject.toml pipelines/tests/test_canonicalization.py",
     "format": "prettier . --write && .\\.venv\\Scripts\\python.exe -m ruff format ai-service pipelines",
     "format:check": "prettier . --check && .\\.venv\\Scripts\\python.exe -m ruff format --check ai-service pipelines",
